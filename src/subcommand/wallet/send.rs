@@ -1,118 +1,75 @@
 use {super::*, crate::outgoing::Outgoing, base64::Engine, bitcoin::psbt::Psbt};
-use clap::Parser;
-use serde::{Serialize, Deserialize};
-use bitcoin::{Transaction, TxOut, Txid, Address};
-
-// Define the Edict struct to handle multiple rune transactions
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Edict {
-    pub rune: String,
-    pub amount: u64,
-    pub destination: Address,
-}
 
 #[derive(Debug, Parser)]
 pub(crate) struct Send {
-    #[arg(long, help = "Don't sign or broadcast transaction")]
-    pub(crate) dry_run: bool,
-
-    #[arg(long, help = "Use fee rate of <FEE_RATE> sats/vB")]
-    fee_rate: FeeRate,
-
-    #[arg(
-        long,
-        help = "Target <AMOUNT> postage with sent inscriptions. [default: 10000 sat]"
-    )]
-    pub(crate) postage: Option<Amount>,
-
-    address: Address<NetworkUnchecked>,
-    outgoing: Outgoing,
-
-    #[arg(long, help = "List of edicts for rune transactions")]
-    pub(crate) edicts: Vec<Edict>, // Optional field for handling multiple Edicts.
+  #[arg(long, help = "Don't sign or broadcast transaction")]
+  pub(crate) dry_run: bool,
+  #[arg(long, help = "Use fee rate of <FEE_RATE> sats/vB")]
+  fee_rate: FeeRate,
+  #[arg(
+    long,
+    help = "Target <AMOUNT> postage with sent inscriptions. [default: 10000 sat]"
+  )]
+  pub(crate) postage: Option<Amount>,
+  address: Address<NetworkUnchecked>,
+  outgoing: Outgoing,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Output {
-    pub txid: Txid,
-    pub psbt: String,
-    pub outgoing: Outgoing,
-    pub fee: u64,
+  pub txid: Txid,
+  pub psbt: String,
+  pub outgoing: Outgoing,
+  pub fee: u64,
 }
 
 impl Send {
-    pub(crate) fn run(self, wallet: Wallet) -> SubcommandResult {
-        let address = self
-            .address
-            .clone()
-            .require_network(wallet.chain().network())?;
+  pub(crate) fn run(self, wallet: Wallet) -> SubcommandResult {
+    let address = self
+      .address
+      .clone()
+      .require_network(wallet.chain().network())?;
 
-        let mut results = Vec::new();
-
-        // Handling single transaction types as before
-        let unsigned_transaction = self.handle_single_transaction_type(&wallet, address)?;
-
-        // Process the transaction for dry run or actual sending
-        let (txid, psbt) = self.process_transaction(&wallet, unsigned_transaction.clone())?;
-
-        // Calculate fee as before
-        let mut fee = self.calculate_fee(&unsigned_transaction, &wallet);
-
-        results.push(Output {
-            txid,
-            psbt,
-            outgoing: self.outgoing.clone(),
-            fee,
-        });
-
-        // Handle multiple Edicts if any
-        for edict in self.edicts {
-            let edict_address = edict.destination.clone().require_network(wallet.chain().network())?;
-            let transaction = self.create_unsigned_send_runes_transaction(
-                &wallet,
-                edict_address,
-                edict.rune.clone(),
-                edict.amount,
-                self.fee_rate,
-            )?;
-
-            let (edict_txid, edict_psbt) = self.process_transaction(&wallet, transaction.clone())?;
-            let edict_fee = self.calculate_fee(&transaction, &wallet);
-
-            results.push(Output {
-                txid: edict_txid,
-                psbt: edict_psbt,
-                outgoing: Outgoing::Rune { 
-                    rune: edict.rune.clone(), 
-                    decimal: Decimal::from(edict.amount) 
-                },
-                fee: edict_fee,
-            });
-        }
-
-        Ok(Some(Box::new(results)))
-    }
-
-    // Helper function to handle the creation of the unsigned transaction based on the outgoing type
-    fn handle_single_transaction_type(&self, wallet: &Wallet, address: Address<NetworkUnchecked>) -> Result<Transaction, anyhow::Error> {
-        match self.outgoing {
-            Outgoing::Amount(amount) => {
-                Self::create_unsigned_send_amount_transaction(wallet, address, amount, self.fee_rate)
-            },
-            Outgoing::Rune { decimal, rune } => {
-                Self::create_unsigned_send_runes_transaction(wallet, address, rune, decimal, self.fee_rate)
-            },
-            Outgoing::InscriptionId(id) => {
-                Self::create_unsigned_send_satpoint_transaction(wallet, address, wallet.inscription_info().get(&id).ok_or_else(|| anyhow!("inscription {id} not found"))?.satpoint, self.postage, self.fee_rate, true)
-            },
-            Outgoing::SatPoint(satpoint) => {
-                Self::create_unsigned_send_satpoint_transaction(wallet, address, satpoint, self.postage, self.fee_rate, false)
-            },
-            Outgoing::Sat(sat) => {
-                Self::create_unsigned_send_satpoint_transaction(wallet, address, wallet.find_sat_in_outputs(sat)?, self.postage, self.fee_rate, true)
-            },
-        }
-    }
+    let unsigned_transaction = match self.outgoing {
+      Outgoing::Amount(amount) => {
+        Self::create_unsigned_send_amount_transaction(&wallet, address, amount, self.fee_rate)?
+      }
+      Outgoing::Rune { decimal, rune } => Self::create_unsigned_send_runes_transaction(
+        &wallet,
+        address,
+        rune,
+        decimal,
+        self.fee_rate,
+      )?,
+      Outgoing::InscriptionId(id) => Self::create_unsigned_send_satpoint_transaction(
+        &wallet,
+        address,
+        wallet
+          .inscription_info()
+          .get(&id)
+          .ok_or_else(|| anyhow!("inscription {id} not found"))?
+          .satpoint,
+        self.postage,
+        self.fee_rate,
+        true,
+      )?,
+      Outgoing::SatPoint(satpoint) => Self::create_unsigned_send_satpoint_transaction(
+        &wallet,
+        address,
+        satpoint,
+        self.postage,
+        self.fee_rate,
+        false,
+      )?,
+      Outgoing::Sat(sat) => Self::create_unsigned_send_satpoint_transaction(
+        &wallet,
+        address,
+        wallet.find_sat_in_outputs(sat)?,
+        self.postage,
+        self.fee_rate,
+        true,
+      )?,
+    };
 
     let unspent_outputs = wallet.utxos();
 
